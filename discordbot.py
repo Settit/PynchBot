@@ -11,6 +11,7 @@ class DiscordClient(discord.Client):
         super().__init__(*args, **kwargs)
         self.bot = bot
         self.last_deleted_uid = None
+        self.last_deleted_ts = None
         self.del_vids_channel = None
         self.logger = logger
 
@@ -34,6 +35,7 @@ class DiscordClient(discord.Client):
 
     async def handle_vid_delete(self, data):
         self.last_deleted_uid = data['uid']
+        self.last_deleted_ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
 
     async def handle_chatMsg(self, data):
         #on bot event 'chatMsg'
@@ -50,17 +52,30 @@ class DiscordClient(discord.Client):
 
         async with self.bot.db.pool.acquire() as connection:
             async with connection.transaction():
-                db_result = await connection.fetch("""select videos.video_type, videos.video_id, videos.video_title, video_adds.from_username
+                db_result = await connection.fetch("""select videos.video_type, videos.video_id, videos.video_title, video_adds.from_username, videos.video_duration
                     from videos
                     inner join video_adds
                     on videos.video_id = video_adds.video_id and videos.video_type = video_adds.video_type
                     where videos.video_title = $1
-                    order by video_adds.ts desc 
+                    order by video_adds.ts desc
                     limit 1
-                    """, 
+                    """,
                     title
                 )
+                #grab last played video (likely race condition so may need to grab last 2)
+                last_played = await connection.fetch("""select *
+                    from video_plays
+                    order by event_ts desc
+                    limit 1
+                """)
+                last_played = last_played[0]
                 db_result = db_result[0] #grab the first (and only) row
+        playstatus = "unknown"
+        if last_played['video_id'] != db_result['video_id']:
+            playstatus = "Video never played"
+        else:
+            #TODO: Take event_ts, video_duration, and time delete happen to calculate percent played
+            playstatus = "Video was playing when deleted"
         from_username = db_result['from_username']
         embed = discord.Embed()
         embed.title = title
@@ -69,6 +84,7 @@ class DiscordClient(discord.Client):
         embed.colour = 0xFF6666
         embed.add_field(name='Posted by', value=from_username)
         embed.add_field(name='Deleted by', value=data['username'])
+        embed.add_field(name='Played status', value=playstatus)
 
         if db_result['video_type'] == 'yt':
             embed.description = 'https://youtu.be/' + db_result['video_id']
